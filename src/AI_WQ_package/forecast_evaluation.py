@@ -47,20 +47,6 @@ def calculate_global_mean(score):
     score_mean = score.mean(('latitude','longitude'),skipna=True)
     return score_mean
 
-#def weighted_mean_calc(score,weighted_only=False):
-#    weights = np.cos(np.deg2rad(score.latitude))
-#    weights.name = 'weights'
-#    # apply weights
-#    score_weighted = score.weighted(weights)
-#   if weighted_only:
-#        weights_2d = weights.broadcast_like(score)
-#        score_weighted = score*weights_2d
-#        return score_weighted
-#    else:
-#        # after weighting, extract selected lat region
-#        score_weighted_mean = score_weighted.mean(('latitude','longitude'))
-#       return score_weighted_mean
-
 def conditional_obs_probs(obs,quintile_bounds):
     num_quantiles=quintile_bounds['quantile'].shape[0]
 
@@ -92,6 +78,10 @@ def conditional_obs_probs(obs,quintile_bounds):
     all_crit = xr.concat(threshold_crit,dim='quintile')
     all_crit = all_crit.assign_coords({'quintile': ('quintile',np.arange(num_quantiles+1))})
 
+    # 28th July 2025 change - when all quintiles equal the same value, i.e. 0 mm precipitation for all five quintiles, i.e. desert, mask out values with np.nan
+    all_equal = (quintile_bounds.min(dim='quantile') == quintile_bounds.max(dim='quantile'))
+    all_crit = all_crit.where(~all_equal)
+
     return all_crit
 
 def calculate_RPS(fc_pbs,obs_pbs,variable,land_sea_mask,quantile_dim='quintile',lat_weighting=True,global_mean=True):
@@ -103,8 +93,12 @@ def calculate_RPS(fc_pbs,obs_pbs,variable,land_sea_mask,quantile_dim='quintile',
     # work out squared value of cumulative difference
     cum_pbs_diff = fc_pbs_cumsum.copy()
     cum_pbs_diff.values = ((fc_pbs_cumsum.values-obs_pbs_cumsum.values)**2.0) # square the cumulative difference between forecast prob and obs prob. Call the actual data within the xarray.
-    print (cum_pbs_diff.mean().values)
     RPS_score = cum_pbs_diff.sum(dim=quantile_dim,skipna=True)
+
+    # 28th July 2025 edit. mask where nan_quintile mask= True, i.e. where in obs_pbs, zero rainfall
+    # create mask where obs_pbs == np.nan (i.e. in deserts, set in conditional obs probs function). only np.nans will exist in precip.
+    nan_quintile_mask = obs_pbs.isnull().all(dim=quantile_dim)
+    RPS_score = RPS_score.where(~nan_quintile_mask)
 
     # apply a land sea mask
     if variable == 'tas' or variable == 'pr':
@@ -117,6 +111,7 @@ def calculate_RPS(fc_pbs,obs_pbs,variable,land_sea_mask,quantile_dim='quintile',
     if global_mean:
         RPS_score = calculate_global_mean(RPS_score) # average across latitude and longitude
 
+    print (RPS_score.values)
     return RPS_score
 
 def work_out_RPSS(fc_pbs,obs_pbs,variable,land_sea_mask,quantile_dim='quintile'):
@@ -127,12 +122,16 @@ def work_out_RPSS(fc_pbs,obs_pbs,variable,land_sea_mask,quantile_dim='quintile')
     num_quants = fc_pbs.shape[0]
 
     # RPS score for forecast
+    print ('RPS for submitted forecast')
     RPS_score_fc = calculate_RPS(fc_pbs,obs_pbs,variable,land_sea_mask)
 
     # create an xarray filled with climatological probs (i.e. 0.2).
-    clim_pbs = obs_pbs.where(False,1.0/num_quants) 
+    clim_pbs = obs_pbs.where(False,1.0/num_quants)
+    print ('RPS for climatology')
     RPS_score_clim = calculate_RPS(clim_pbs,obs_pbs,variable,land_sea_mask)
 
+    print ('RPSS with respect to climatology')
     RPSS_wrt_clim = 1-(RPS_score_fc/RPS_score_clim)
-
+    print (RPSS_wrt_clim.values)
+    
     return RPSS_wrt_clim
